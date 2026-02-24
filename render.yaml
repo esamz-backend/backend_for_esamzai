@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: esamz-backend
+    runtime: rust
+    plan: free
+    buildCommand: cargo build --release
+    startCommand: ./target/release/esamz
+    healthCheckPath: /health
+
+    envVars:
+      - key: SARVAM_API_KEY
+        sync: false          # means: enter manually in dashboard
+
+      - key: SERPER_API_KEY
+        sync: false
+
+      - key: KV_REST_API_URL
+        sync: false
+
+      - key: KV_REST_API_TOKEN
+        sync: false
+
+      - key: PRIVACY_MODE
+        value: false         # hardcoded default, change in dashboard if needed
+
+      - key: ENVIRONMENT
+        value: production
+
+      - key: RUST_LOG
+        value: esamz=info,tower_http=warn
