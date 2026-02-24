@@ -1368,7 +1368,7 @@ async fn main() {
     let allowed_origins = [
         "https://esamz.site",
         "https://www.esamz.site",
-        "http://localhost:3000",
+    
     ];
     let cors = CorsLayer::new()
         .allow_origin(
