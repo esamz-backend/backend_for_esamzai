@@ -752,8 +752,7 @@ pub async fn stream_sarvam(
             process_sse_line(&line, &tx).await;
         }
     }
-let final_line = buffer.trim();
-if !final_line.is_empty() ... { ... tx.send(content.to_string()).await; }
+
     // [FIX-2] Flush ALL remaining lines in the buffer, not just the first one.
     // Split on newlines and process each line individually so no token is lost.
     let remainder = std::mem::take(&mut buffer);
