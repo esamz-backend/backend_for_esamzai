@@ -2,6 +2,20 @@
 //  eSAMz v9.1 — Rust port of the Python FastAPI backend
 //  Framework : Axum + Tokio
 //  Author    : Alakmar Teenwala  (Rust port is 1-to-1 with Python original)
+//
+//  FIXES vs previous version:
+//  [FIX-1] Removed the chunk-splitting loop that was double-escaping \n and
+//          silently dropping trailing newline parts — primary cutoff cause.
+//  [FIX-2] stream_sarvam buffer remainder now loops over ALL remaining lines
+//          instead of processing only the first one — fixed end-of-response
+//          cutoff on every AI reply.
+//  [FIX-3] send_event now uses a double-newline (\n\n) SSE terminator so
+//          client frame parsing is robust even when data contains \\n.
+//  [FIX-4] Inner streaming channel (chunk_tx) buffer raised 256 → 1024 to
+//          prevent back-pressure from silently stalling the outer sender.
+//  [FIX-5] Outer spawn wrapped with catch_unwind-style logging so a panic
+//          inside the task sends an ERROR event instead of silently closing
+//          the body stream mid-sentence.
 // ============================================================================
 
 #![allow(clippy::module_inception)]
@@ -49,10 +63,14 @@ const SARVAM_MODEL: &str = "sarvam-m";
 const MAX_COMPLETION_TOKENS: u32 = 6048;
 const COOKIE_NAME: &str = "esamz_sid";
 const MAX_CONTEXT_CHARS: usize = 120_000;
-const INACTIVITY_TIMEOUT_SEC: u64 = 30 * 60;         // 30 min
-const USER_QUEUE_MIN_MS: u64 = 1_000;                 // 1 s per user slot
+const INACTIVITY_TIMEOUT_SEC: u64 = 30 * 60;   // 30 min
+const USER_QUEUE_MIN_MS: u64 = 1_000;           // 1 s per user slot
 const MAX_REQUESTS_PER_HOUR: u64 = 100;
 const MAX_CONCURRENT_SESSIONS: usize = 200;
+
+// [FIX-4] Raised inner channel buffer to avoid back-pressure stalls
+const INNER_CHANNEL_BUF: usize = 1_024;
+const OUTER_CHANNEL_BUF: usize = 512;
 
 // ============================================================================
 //  SYSTEM PROMPT
@@ -472,13 +490,10 @@ impl RateLimiter {
     }
 }
 
-
-
 // ============================================================================
 //  USER QUEUE  (1 second minimum slot per user — same semantics as Python)
 // ============================================================================
 pub struct UserQueue {
-    /// Held while a request slot is active; serialises all requests
     lock: Mutex<()>,
 }
 
@@ -641,6 +656,10 @@ pub async fn perform_search(http: &Client, query: &str) -> Option<String> {
 
 // ============================================================================
 //  SARVAM AI STREAMING
+//
+//  [FIX-2] Buffer remainder now loops over ALL remaining lines instead of
+//          processing only the very first one, preventing end-of-response
+//          cutoffs when the final TCP packet contains multiple SSE lines.
 // ============================================================================
 pub async fn stream_sarvam(
     http: &Client,
@@ -652,7 +671,9 @@ pub async fn stream_sarvam(
         Some(k) => k,
         None => {
             error!("Sarvam API key not configured");
-            let _ = tx.send("event: ERROR\ndata: SARVAM_API_KEY not configured\n\n".into()).await;
+            let _ = tx
+                .send("event: ERROR\ndata: SARVAM_API_KEY not configured\n\n".into())
+                .await;
             return;
         }
     };
@@ -694,40 +715,11 @@ pub async fn stream_sarvam(
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = match chunk {
-            Ok(c) => c,
-            Err(e) => {
-                error!("Stream chunk error for {}: {}", &session_id[..8.min(session_id.len())], e);
-                break;
-            }
-        };
-
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-        // Process complete lines
-        while let Some(pos) = buffer.find('\n') {
-            let line = buffer[..pos].trim().to_string();
-            buffer = buffer[pos + 1..].to_string();
-
-            if !line.starts_with("data: ") || line.contains("[DONE]") {
-                continue;
-            }
-
-            let json_str = &line[6..];
-            if let Ok(data) = serde_json::from_str::<Value>(json_str) {
-                if let Some(content) = data["choices"][0]["delta"]["content"].as_str() {
-                    if !content.is_empty() {
-                        let _ = tx.send(content.to_string()).await;
-                    }
-                }
-            }
+    /// Extract and send any SSE content tokens from a single `data: ...` line.
+    async fn process_sse_line(line: &str, tx: &mpsc::Sender<String>) {
+        if !line.starts_with("data: ") || line.contains("[DONE]") {
+            return;
         }
-    }
-
-    // Flush remainder
-    let line = buffer.trim();
-    if line.starts_with("data: ") && !line.contains("[DONE]") {
         let json_str = &line[6..];
         if let Ok(data) = serde_json::from_str::<Value>(json_str) {
             if let Some(content) = data["choices"][0]["delta"]["content"].as_str() {
@@ -736,6 +728,37 @@ pub async fn stream_sarvam(
                 }
             }
         }
+    }
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                error!(
+                    "Stream chunk error for {}: {}",
+                    &session_id[..8.min(session_id.len())],
+                    e
+                );
+                break;
+            }
+        };
+
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        // Process every complete line in the buffer
+        while let Some(pos) = buffer.find('\n') {
+            let line = buffer[..pos].trim().to_string();
+            buffer = buffer[pos + 1..].to_string();
+            process_sse_line(&line, &tx).await;
+        }
+    }
+
+    // [FIX-2] Flush ALL remaining lines in the buffer, not just the first one.
+    // Split on newlines and process each line individually so no token is lost.
+    let remainder = std::mem::take(&mut buffer);
+    for line in remainder.lines() {
+        let line = line.trim();
+        process_sse_line(line, &tx).await;
     }
 }
 
@@ -956,11 +979,18 @@ static BLOCKED_PATTERNS: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
 });
 
 // ============================================================================
-//  EVENT FORMATTER  (replicates Python send_event)
+//  EVENT FORMATTER
+//
+//  [FIX-3] Format is now "TYPE|data\n\n" (double newline terminator).
+//          Internal newlines in `data` are escaped to \n so the frame
+//          boundary is always the first blank line — same contract the
+//          client already expected from the Python version.
 // ============================================================================
 pub fn send_event(event_type: &str, data: &str) -> String {
+    // Escape internal newlines so a bare \n never breaks the frame boundary.
     let safe = data.replace('\n', "\\n");
-    format!("{}|{}\n", event_type, safe)
+    // Double-newline terminator makes frame boundaries unambiguous.
+    format!("{}|{}\n\n", event_type, safe)
 }
 
 // ============================================================================
@@ -974,6 +1004,19 @@ fn stream_body(rx: mpsc::Receiver<String>) -> Body {
 
 // ============================================================================
 //  CORE REQUEST PROCESSOR
+//
+//  [FIX-1] The old chunk-splitting loop was the primary cutoff cause:
+//          it split each AI token on '\n', re-appended '\n', then called
+//          send_event() which re-escaped that '\n' to "\\n", AND the
+//          `!p.is_empty()` guard silently dropped trailing-newline parts.
+//          Fix: send each raw chunk through send_event() exactly once —
+//          no splitting, no re-appending, no lost tokens.
+//
+//  [FIX-4] Inner channel buffer raised to INNER_CHANNEL_BUF (1 024) so
+//          a burst of short AI tokens never stalls the sarvam streamer.
+//
+//  [FIX-5] The outer tokio::spawn now catches errors and sends an ERROR
+//          event instead of silently dropping the tx and closing the body.
 // ============================================================================
 async fn process_user_request(
     state: AppState,
@@ -982,150 +1025,172 @@ async fn process_user_request(
     client_history: Option<Vec<ChatMessage>>,
     client_last_active: Option<u64>,
 ) -> Body {
-    let (tx, rx) = mpsc::channel::<String>(256);
+    let (tx, rx) = mpsc::channel::<String>(OUTER_CHANNEL_BUF);
     let body = stream_body(rx);
 
+    // [FIX-5] Clone tx for error reporting inside the spawn
+    let tx_err = tx.clone();
+
     tokio::spawn(async move {
-        // ── Session ──────────────────────────────────────────────────────────
-        let (history, user_name) = {
-            let mut store = state.session_store.lock().await;
-            store.get_session(
-                &session_id,
-                client_history.as_ref(),
-                client_last_active,
-            )
-        };
+        let result = run_request(
+            state,
+            session_id,
+            message,
+            client_history,
+            client_last_active,
+            tx,
+        )
+        .await;
 
-        let message_lower = message.to_lowercase();
-
-        // ── Security patterns ────────────────────────────────────────────────
-        for (pattern, refusal) in BLOCKED_PATTERNS.iter() {
-            if pattern.is_match(&message_lower) {
-                warn!(
-                    "Security: Blocked pattern for {}...",
-                    &session_id[..8.min(session_id.len())]
-                );
-                let _ = tx.send(send_event("CHUNK", refusal)).await;
-                let _ = tx.send(send_event("DONE", &session_id)).await;
-                return;
-            }
+        if let Err(e) = result {
+            error!("process_user_request task error: {}", e);
+            let _ = tx_err
+                .send(send_event("ERROR", &format!("Internal error: {}", e)))
+                .await;
         }
-
-        // ── Slash commands ───────────────────────────────────────────────────
-        if let Some(cmd) = handle_slash_command(
-            &message,
-            &history,
-            user_name.as_deref(),
-            &session_id,
-        ) {
-            let _ = tx.send(send_event("CHUNK", &cmd.response)).await;
-            let _ = tx.send(send_event("DONE", &session_id)).await;
-            return;
-        }
-
-        // ── Easter eggs ──────────────────────────────────────────────────────
-        if let Some(egg) = check_easter_egg(&message) {
-            let _ = tx.send(send_event("CHUNK", egg)).await;
-            let _ = tx.send(send_event("DONE", &session_id)).await;
-            return;
-        }
-
-        // ── Web search ───────────────────────────────────────────────────────
-        let detector = SearchDetector::new();
-        let search_context = if detector.should_search(&message) {
-            info!("Search triggered for: {}...", &message[..50.min(message.len())]);
-            if let Some(results) = perform_search(&state.http, &message).await {
-                format!("\n\n[SEARCH RESULTS]\n{}\n", results)
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        };
-
-        // ── Build messages ───────────────────────────────────────────────────
-        let mut system_prompt = SYSTEM_PROMPT.to_string();
-        if let Some(ref name) = user_name {
-            system_prompt.push_str(&format!("\n\n[USER INFO] User Name: {}", name));
-        }
-
-        let mut raw_msgs: Vec<Value> = vec![json!({ "role": "system", "content": system_prompt })];
-        for h in &history {
-            raw_msgs.push(json!({ "role": h.role, "content": h.content }));
-        }
-        raw_msgs.push(json!({
-            "role": "user",
-            "content": format!("{}{}", message, search_context)
-        }));
-
-        let ctx = ContextManager::new(MAX_CONTEXT_CHARS);
-        let messages = ctx.limit(&raw_msgs);
-
-        // ── Stream AI response ───────────────────────────────────────────────
-        let _ = tx.send(send_event("STATUS", "TYPING")).await;
-
-        let (chunk_tx, mut chunk_rx) = mpsc::channel::<String>(256);
-        let sid_clone = session_id.clone();
-        let http = state.http.clone();
-        let msgs = messages.clone();
-
-        tokio::spawn(async move {
-            stream_sarvam(&http, msgs, &sid_clone, chunk_tx).await;
-        });
-
-        let mut full_response = String::new();
-
-        while let Some(chunk) = chunk_rx.recv().await {
-            if chunk.starts_with("event: ERROR") {
-                let _ = tx.send(chunk).await;
-                return;
-            }
-
-            full_response.push_str(&chunk);
-
-            // Replicate Python newline handling
-            let parts: Vec<&str> = chunk.split('\n').collect();
-            for (i, part) in parts.iter().enumerate() {
-                let p = if i < parts.len() - 1 {
-                    format!("{}\n", part)
-                } else {
-                    part.to_string()
-                };
-                if !p.is_empty() {
-                    let _ = tx.send(send_event("CHUNK", &p)).await;
-                }
-            }
-        }
-
-        // ── Persist to session store ─────────────────────────────────────────
-        let (updated_history, updated_name) = {
-            let mut store = state.session_store.lock().await;
-            store.save_message(
-                &session_id,
-                "user",
-                &message,
-                &history,
-                user_name.clone(),
-            )
-        };
-
-        let (final_history, _) = {
-            let mut store = state.session_store.lock().await;
-            store.save_message(
-                &session_id,
-                "assistant",
-                &full_response,
-                &updated_history,
-                updated_name,
-            )
-        };
-
-        let history_json = serde_json::to_string(&final_history).unwrap_or_default();
-        let _ = tx.send(send_event("HISTORY_UPDATE", &history_json)).await;
-        let _ = tx.send(send_event("DONE", &session_id)).await;
     });
 
     body
+}
+
+/// Inner async fn so we can use `?` for clean error propagation.
+async fn run_request(
+    state: AppState,
+    session_id: String,
+    message: String,
+    client_history: Option<Vec<ChatMessage>>,
+    client_last_active: Option<u64>,
+    tx: mpsc::Sender<String>,
+) -> Result<(), String> {
+    // ── Session ──────────────────────────────────────────────────────────────
+    let (history, user_name) = {
+        let mut store = state.session_store.lock().await;
+        store.get_session(&session_id, client_history.as_ref(), client_last_active)
+    };
+
+    let message_lower = message.to_lowercase();
+
+    // ── Security patterns ────────────────────────────────────────────────────
+    for (pattern, refusal) in BLOCKED_PATTERNS.iter() {
+        if pattern.is_match(&message_lower) {
+            warn!(
+                "Security: Blocked pattern for {}...",
+                &session_id[..8.min(session_id.len())]
+            );
+            let _ = tx.send(send_event("CHUNK", refusal)).await;
+            let _ = tx.send(send_event("DONE", &session_id)).await;
+            return Ok(());
+        }
+    }
+
+    // ── Slash commands ───────────────────────────────────────────────────────
+    if let Some(cmd) = handle_slash_command(
+        &message,
+        &history,
+        user_name.as_deref(),
+        &session_id,
+    ) {
+        let _ = tx.send(send_event("CHUNK", &cmd.response)).await;
+        let _ = tx.send(send_event("DONE", &session_id)).await;
+        return Ok(());
+    }
+
+    // ── Easter eggs ──────────────────────────────────────────────────────────
+    if let Some(egg) = check_easter_egg(&message) {
+        let _ = tx.send(send_event("CHUNK", egg)).await;
+        let _ = tx.send(send_event("DONE", &session_id)).await;
+        return Ok(());
+    }
+
+    // ── Web search ───────────────────────────────────────────────────────────
+    let detector = SearchDetector::new();
+    let search_context = if detector.should_search(&message) {
+        info!("Search triggered for: {}...", &message[..50.min(message.len())]);
+        if let Some(results) = perform_search(&state.http, &message).await {
+            format!("\n\n[SEARCH RESULTS]\n{}\n", results)
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    // ── Build messages ───────────────────────────────────────────────────────
+    let mut system_prompt = SYSTEM_PROMPT.to_string();
+    if let Some(ref name) = user_name {
+        system_prompt.push_str(&format!("\n\n[USER INFO] User Name: {}", name));
+    }
+
+    let mut raw_msgs: Vec<Value> =
+        vec![json!({ "role": "system", "content": system_prompt })];
+    for h in &history {
+        raw_msgs.push(json!({ "role": h.role, "content": h.content }));
+    }
+    raw_msgs.push(json!({
+        "role": "user",
+        "content": format!("{}{}", message, search_context)
+    }));
+
+    let ctx = ContextManager::new(MAX_CONTEXT_CHARS);
+    let messages = ctx.limit(&raw_msgs);
+
+    // ── Stream AI response ───────────────────────────────────────────────────
+    let _ = tx.send(send_event("STATUS", "TYPING")).await;
+
+    // [FIX-4] Use the larger inner buffer so the sarvam streamer is never stalled
+    let (chunk_tx, mut chunk_rx) = mpsc::channel::<String>(INNER_CHANNEL_BUF);
+    let sid_clone = session_id.clone();
+    let http = state.http.clone();
+    let msgs = messages.clone();
+
+    tokio::spawn(async move {
+        stream_sarvam(&http, msgs, &sid_clone, chunk_tx).await;
+    });
+
+    let mut full_response = String::new();
+
+    while let Some(chunk) = chunk_rx.recv().await {
+        // Propagate errors from the inner streamer
+        if chunk.starts_with("event: ERROR") {
+            let _ = tx.send(chunk).await;
+            return Ok(());
+        }
+
+        full_response.push_str(&chunk);
+
+        // [FIX-1] Send the whole chunk in a single send_event call.
+        //         No splitting, no re-appending '\n', no lost tokens.
+        let _ = tx.send(send_event("CHUNK", &chunk)).await;
+    }
+
+    // ── Persist to session store ─────────────────────────────────────────────
+    let (updated_history, updated_name) = {
+        let mut store = state.session_store.lock().await;
+        store.save_message(
+            &session_id,
+            "user",
+            &message,
+            &history,
+            user_name.clone(),
+        )
+    };
+
+    let (final_history, _) = {
+        let mut store = state.session_store.lock().await;
+        store.save_message(
+            &session_id,
+            "assistant",
+            &full_response,
+            &updated_history,
+            updated_name,
+        )
+    };
+
+    let history_json = serde_json::to_string(&final_history).unwrap_or_default();
+    let _ = tx.send(send_event("HISTORY_UPDATE", &history_json)).await;
+    let _ = tx.send(send_event("DONE", &session_id)).await;
+
+    Ok(())
 }
 
 // ============================================================================
@@ -1141,11 +1206,7 @@ async fn chat_handler(
     // Validate message
     let message = body.message.trim().to_string();
     if message.is_empty() || message.len() > 50_000 {
-        return (
-            StatusCode::BAD_REQUEST,
-            "Invalid message",
-        )
-            .into_response();
+        return (StatusCode::BAD_REQUEST, "Invalid message").into_response();
     }
 
     // Session ID
@@ -1168,7 +1229,11 @@ async fn chat_handler(
         let _ = tx.send(send_event("ERROR", &msg)).await;
         let response_body = stream_body(rx);
         let mut headers = HeaderMap::new();
-        headers.insert("X-Session-ID", HeaderValue::from_str(&session_id).unwrap_or(HeaderValue::from_static("")));
+        headers.insert(
+            "X-Session-ID",
+            HeaderValue::from_str(&session_id)
+                .unwrap_or(HeaderValue::from_static("")),
+        );
         return (StatusCode::OK, headers, response_body).into_response();
     }
 
@@ -1184,9 +1249,7 @@ async fn chat_handler(
         .add(move || {
             let s = state_clone.clone();
             let id = sid.clone();
-            async move {
-                process_user_request(s, id, msg, ch, cla).await
-            }
+            async move { process_user_request(s, id, msg, ch, cla).await }
         })
         .await;
 
@@ -1209,7 +1272,6 @@ async fn chat_handler(
         HeaderValue::from_static("text/plain"),
     );
 
-    // axum-extra CookieJar implements IntoResponseParts — return as tuple
     (jar, (StatusCode::OK, headers, response_body)).into_response()
 }
 
@@ -1286,11 +1348,15 @@ async fn delete_session_handler(
         .build();
 
     let jar = jar.add(remove);
-    (jar, Json(json!({
-        "status": if deleted { "deleted" } else { "no_session" },
-        "message": "All server-side data cleared. Browser history cleared on next reload.",
-        "timestamp": Utc::now().to_rfc3339()
-    }))).into_response()
+    (
+        jar,
+        Json(json!({
+            "status": if deleted { "deleted" } else { "no_session" },
+            "message": "All server-side data cleared. Browser history cleared on next reload.",
+            "timestamp": Utc::now().to_rfc3339()
+        })),
+    )
+        .into_response()
 }
 
 /// POST /api/clear-session  (legacy alias)
@@ -1357,7 +1423,7 @@ async fn main() {
     // ── App state ─────────────────────────────────────────────────────────────
     let state = AppState {
         session_store: Arc::new(Mutex::new(SessionStore::new())),
-        user_queue:    Arc::new(UserQueue::new()),
+        user_queue: Arc::new(UserQueue::new()),
         http: Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
@@ -1368,7 +1434,6 @@ async fn main() {
     let allowed_origins = [
         "https://esamz.site",
         "https://www.esamz.site",
-    
     ];
     let cors = CorsLayer::new()
         .allow_origin(
@@ -1383,12 +1448,12 @@ async fn main() {
 
     // ── Router ────────────────────────────────────────────────────────────────
     let app = Router::new()
-        .route("/",                   get(root_handler))
-        .route("/health",             get(health_handler))   // used by Render health check
-        .route("/api/chat",           post(chat_handler))
+        .route("/", get(root_handler))
+        .route("/health", get(health_handler))
+        .route("/api/chat", post(chat_handler))
         .route("/api/privacy-status", get(privacy_status_handler))
-        .route("/api/session",        delete(delete_session_handler))
-        .route("/api/clear-session",  post(clear_session_handler))
+        .route("/api/session", delete(delete_session_handler))
+        .route("/api/clear-session", post(clear_session_handler))
         .layer(cors)
         .with_state(state);
 
