@@ -1388,7 +1388,7 @@ async fn root_handler() -> impl IntoResponse {
         "name": "eSAMz v9.1 API",
         "version": "9.1",
         "creator": "Alakmar Teenwala",
-        "privacyPolicy": "https://esamz.site/privacy",
+        "privacyPolicy": "https://esamz.info/privacy",
         "deploymentMode": if is_serverless() { "serverless" } else { "server" },
         "endpoints": {
             "chat": "POST /api/chat",
@@ -1433,8 +1433,8 @@ async fn main() {
 
     // ── CORS ──────────────────────────────────────────────────────────────────
     let allowed_origins = [
-        "https://esamz.site",
-        "https://www.esamz.site",
+        "https://esamz.tech",
+        "https://www.esamz.tech",
     ];
     let cors = CorsLayer::new()
         .allow_origin(
