@@ -8,11 +8,11 @@ services:
     healthCheckPath: /health
 
     envVars:
-      - key: SARVAM_API_KEY
-        sync: false          # means: enter manually in dashboard
-
       - key: SERPER_API_KEY
         sync: false
+
+      - key: WIKIPEDIA_USER_AGENT
+        value: "eSAMz-AI/1.0 (https://esamz.ai; contact@esamz.ai)"
 
       - key: KV_REST_API_URL
         sync: false
@@ -21,7 +21,7 @@ services:
         sync: false
 
       - key: PRIVACY_MODE
-        value: false         # hardcoded default, change in dashboard if needed
+        value: "false"
 
       - key: ENVIRONMENT
         value: production
