@@ -1,13 +1,18 @@
 services:
   - type: web
     name: esamz-backend
-    runtime: docker
+    runtime: rust
     plan: free
-    dockerfilePath: ./Dockerfile
+    buildCommand: cargo build --release
+    startCommand: ./target/release/esamz
     healthCheckPath: /health
     envVars:
+      - key: SARVAM_API_KEY
+        sync: false
       - key: SERPER_API_KEY
         sync: false
+      - key: WIKIPEDIA_USER_AGENT
+        value: "eSAMz-AI/1.0 (https://esamz.ai; esamzai365@gmail.com)"
       - key: KV_REST_API_URL
         sync: false
       - key: KV_REST_API_TOKEN

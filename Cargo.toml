@@ -1,6 +1,6 @@
 [package]
 name    = "esamz"
-version = "9.1.0"
+version = "9.4.0"
 edition = "2021"
 
 [[bin]]
@@ -36,7 +36,7 @@ chrono          = { version = "0.4",  features = ["serde"] }
 hex             = "0.4"
 bytes           = "1"
 time            = "0.3"
-llama-cpp-2 = { version = "0.1", features = ["sampler"] }
+
 # ── Logging / tracing ────────────────────────────────────────────────────────
 tracing             = "0.1"
 tracing-subscriber  = { version = "0.3", features = ["env-filter", "fmt"] }
