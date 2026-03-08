@@ -1,35 +1,20 @@
 services:
   - type: web
     name: esamz-backend
-    runtime: rust
+    runtime: docker
     plan: free
-   buildCommand: >
-  apt-get install -y build-essential libclang-dev &&
-  wget -q https://huggingface.co/Qwen/Qwen1.5-0.5B-Chat-GGUF/resolve/main/qwen1_5-0_5b-chat-q2_k_m.gguf -O qwen-0.5b.gguf &&
-  cargo build --release
-    startCommand: ./target/release/esamz
+    dockerfilePath: ./Dockerfile
     healthCheckPath: /health
-
     envVars:
       - key: SERPER_API_KEY
         sync: false
-
-      - key: WIKIPEDIA_USER_AGENT
-        value: "eSAMz-AI/1.0 (https://esamz.ai; contact@esamz.ai)"
-
       - key: KV_REST_API_URL
         sync: false
-
       - key: KV_REST_API_TOKEN
         sync: false
-
       - key: PRIVACY_MODE
         value: "false"
-
       - key: ENVIRONMENT
         value: production
-
       - key: RUST_LOG
         value: esamz=info,tower_http=warn
-      - key: QWEN_MODEL_PATH
-        value: /qwen-0.5b.gguf
