@@ -5,7 +5,7 @@ services:
     plan: free
    buildCommand: >
   apt-get install -y build-essential libclang-dev &&
-  wget -q https://huggingface.co/Qwen/Qwen1.5-0.5B-Chat-GGUF/resolve/main/qwen1_5-0_5b-chat-q4_k_m.gguf -O qwen-0.5b.gguf &&
+  wget -q https://huggingface.co/Qwen/Qwen1.5-0.5B-Chat-GGUF/resolve/main/qwen1_5-0_5b-chat-q2_k_m.gguf -O qwen-0.5b.gguf &&
   cargo build --release
     startCommand: ./target/release/esamz
     healthCheckPath: /health
