@@ -59,7 +59,8 @@ use tracing::{error, info, warn};
 const SARVAM_MODEL: &str = "sarvam-105b";
 const MAX_COMPLETION_TOKENS: u32 = 24_096;
 const SARVAM_CONTEXT_WINDOW: usize = 128_000;
-const CHARS_PER_TOKEN_ESTIMATE: f64 = 3.5;
+const ENGLISH_CHARS_PER_TOKEN: f64 = 3.5;
+const INDIC_CHARS_PER_TOKEN: f64 = 1.8;
 const COOKIE_NAME: &str = "esamz_sid";
 const MAX_CONTEXT_CHARS: usize = 280_000;
 const INACTIVITY_TIMEOUT_SEC: u64 = 30 * 60;
@@ -373,8 +374,22 @@ pub fn extract_name_from_message(content: &str) -> Option<String> {
 // ============================================================================
 //  TOKEN ESTIMATOR
 // ============================================================================
+// ============================================================================
+//  TOKEN ESTIMATOR
+// ============================================================================
 fn estimate_tokens(text: &str) -> usize {
-    (text.len() as f64 / CHARS_PER_TOKEN_ESTIMATE).ceil() as usize
+    let char_count = text.chars().count(); // Counts true characters, not bytes
+    
+    // Quick check: If there are non-ASCII characters, it's likely Indic
+    let is_indic = text.chars().any(|c| !c.is_ascii());
+
+    let ratio = if is_indic {
+        INDIC_CHARS_PER_TOKEN
+    } else {
+        ENGLISH_CHARS_PER_TOKEN
+    };
+
+    (char_count as f64 / ratio).ceil() as usize
 }
 
 fn estimate_message_tokens(msg: &Value) -> usize {
@@ -382,7 +397,6 @@ fn estimate_message_tokens(msg: &Value) -> usize {
     let role = msg["role"].as_str().unwrap_or("");
     estimate_tokens(content) + estimate_tokens(role) + 4
 }
-
 // ============================================================================
 //  CONTEXT MANAGER  [FIX-13, FIX-14]
 // ============================================================================
