@@ -56,12 +56,12 @@ use tracing::{error, info, warn};
 // ============================================================================
 //  CONSTANTS / CONFIG
 // ============================================================================
-const SARVAM_MODEL: &str = "sarvam-m";
-const MAX_COMPLETION_TOKENS: u32 = 4_096;
-const SARVAM_CONTEXT_WINDOW: usize = 32_000;
+const SARVAM_MODEL: &str = "sarvam-105b";
+const MAX_COMPLETION_TOKENS: u32 = 24_096;
+const SARVAM_CONTEXT_WINDOW: usize = 128_000;
 const CHARS_PER_TOKEN_ESTIMATE: f64 = 3.5;
 const COOKIE_NAME: &str = "esamz_sid";
-const MAX_CONTEXT_CHARS: usize = 80_000;
+const MAX_CONTEXT_CHARS: usize = 180_000;
 const INACTIVITY_TIMEOUT_SEC: u64 = 30 * 60;
 const USER_QUEUE_MIN_MS: u64 = 1_000;
 const MAX_REQUESTS_PER_HOUR: u64 = 100;
