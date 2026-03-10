@@ -69,10 +69,10 @@ const SARVAM_CONTEXT_WINDOW: usize = 128_000;
 const ENGLISH_CHARS_PER_TOKEN: f64 = 3.5;
 const INDIC_CHARS_PER_TOKEN: f64 = 3.0;
 const COOKIE_NAME: &str = "esamz_sid";
-const MAX_CONTEXT_CHARS: usize = 90_000;
+const MAX_CONTEXT_CHARS: usize = 360_000;
 const INACTIVITY_TIMEOUT_SEC: u64 = 30 * 60;
 // [FIX-B14] Reduced from 1000ms — removes the forced 1-second delay per request
-const USER_QUEUE_MIN_MS: u64 = 200;
+const USER_QUEUE_MIN_MS: u64 = 1000;
 const MAX_REQUESTS_PER_HOUR: u64 = 100;
 const MAX_CONCURRENT_SESSIONS: usize = 200;
 const PROTECTED_RECENT_MESSAGES: usize = 4;
