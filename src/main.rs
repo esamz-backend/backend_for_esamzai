@@ -1441,7 +1441,7 @@ async fn chat_handler(
     Json(body): Json<ChatRequest>,
 ) -> impl IntoResponse {
     let message = body.message.trim().to_string();
-    if message.is_empty() || message.len() > 50_000 {
+    if message.is_empty() || message.len() > 250_000{
         return (StatusCode::BAD_REQUEST, "Invalid message").into_response();
     }
 
@@ -1621,12 +1621,15 @@ async fn main() {
         .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers(Any);
+    
+    use ax_extract::DefaultBodyLimit;
 
     let app = Router::new()
         .route("/api/chat", post(chat_handler))
         .route("/api/privacy-status", get(privacy_status_handler))
         .route("/api/session", delete(delete_session_handler))
         .route("/health", get(health_handler))
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // Set limit to 10MB
         .layer(cors)
         .with_state(state);
 
