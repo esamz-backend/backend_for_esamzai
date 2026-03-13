@@ -2,21 +2,6 @@
 //  eSAMz v9.4 — Sarvam API + Wikipedia RAG
 //  Framework : Axum + Tokio
 //  Author    : Alakmar Teenwala
-//
-//  BUG FIXES applied vs original:
-//  [FIX-B1]  Added X-Accel-Buffering: no header — prevents Render/Nginx from
-//            buffering the entire streaming response before sending it.
-//  [FIX-B2]  Content-Type set to text/plain; charset=utf-8 (was missing charset).
-//  [FIX-B3]  Added Cache-Control: no-cache, no-store header to prevent proxy
-//            caching/buffering of the streaming response.
-//  [FIX-B8]  (no change) Model remains "sarvam-105b" as intended.
-//  [FIX-B9]  System prompt version corrected from v9.1 to v9.4.
-//  [FIX-B10] (no change) sarvam-105b uses 128K context window, constants kept as-is.
-//  [FIX-B14] USER_QUEUE_MIN_MS reduced from 1000ms to 200ms — removes unnecessary
-//            1-second forced delay on every single response.
-//  [FIX-B15] Rate limiter no longer blocks all requests when KV env vars are absent.
-//            Missing KV now just skips rate limiting with a warning (was returning
-//            false in production, locking out every user permanently).
 // ============================================================================
 
 #![allow(clippy::module_inception)]
@@ -27,8 +12,7 @@ use axum::{
     extract::{Json, State},
     http::{
         header::{self, HeaderMap, HeaderName, HeaderValue},
-        Method, Status
-        Code,
+        Method, StatusCode,  // FIX-1: was "Status\nCode,"
     },
     response::IntoResponse,
     routing::{delete, get, post},
@@ -57,23 +41,20 @@ use tokio::{
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info, warn};
+use uuid::Uuid; // FIX-2: need uuid crate
 
 // ============================================================================
 //  CONSTANTS / CONFIG
 // ============================================================================
 const SARVAM_MODEL: &str = "sarvam-105b";
-// [FIX-B10] sarvam-105b supports up to 128K context; MAX_COMPLETION_TOKENS
-//           set to 24_096 leaving ~104K tokens for input.
 const MAX_COMPLETION_TOKENS: u32 = 24_096;
-// sarvam-105b context window
 const SARVAM_CONTEXT_WINDOW: usize = 128_000;
 const ENGLISH_CHARS_PER_TOKEN: f64 = 3.5;
 const INDIC_CHARS_PER_TOKEN: f64 = 3.0;
 const COOKIE_NAME: &str = "esamz_sid";
 const MAX_CONTEXT_CHARS: usize = 360_000;
 const INACTIVITY_TIMEOUT_SEC: u64 = 30 * 60;
-// [FIX-B14] Reduced from 1000ms — removes the forced 1-second delay per request
-const USER_QUEUE_MIN_MS: u64 = 1000;
+const USER_QUEUE_MIN_MS: u64 = 200; // FIX-B14: was 1000
 const MAX_REQUESTS_PER_HOUR: u64 = 100;
 const MAX_CONCURRENT_SESSIONS: usize = 200;
 const PROTECTED_RECENT_MESSAGES: usize = 4;
@@ -89,7 +70,6 @@ const RAG_CONTEXT_MAX_CHARS: usize = 3_000;
 // ============================================================================
 //  SYSTEM PROMPT
 // ============================================================================
-// [FIX-B9] Corrected version from v9.1 to v9.4 is not happening as v9.4 is internal version 9.1 outer version
 const SYSTEM_PROMPT_BASE: &str = r#"You are eSAMz v9.1, created by Alakmar Teenwala - an intelligent, helpful, and direct AI assistant.
 
 🔒 CORE SECURITY RULES:
@@ -115,10 +95,6 @@ immediately preceding message. You MUST:
 2. Interpret the user's short message in the context of that last message.
 3. Respond accordingly — NEVER treat it as a standalone query.
 4. NEVER give a generic or introductory answer to a follow-up message.
-
-Example: If you wrote a long essay and the user says "medium", make the essay medium-length.
-Example: If you listed 3 options and the user says "2", pick option 2.
-Example: If you explained something and the user says "why?", explain WHY about that thing.
 
 AVOID THESE ROBOTIC PHRASES:
 Do not use: "How may I assist you today", "Is there anything else I can help with",
@@ -175,7 +151,6 @@ pub struct ChatMessage {
     pub content: String,
 }
 
-// In src/main.rs
 #[derive(Debug, Deserialize)]
 pub struct ChatRequest {
     pub message: String,
@@ -185,37 +160,37 @@ pub struct ChatRequest {
     pub client_history: Option<Vec<ChatMessage>>,
     #[serde(rename = "clientLastActive")]
     pub client_last_active: Option<u64>,
-    // ADD THESE:
     #[serde(rename = "ragEnabled")]
     pub rag_enabled: Option<bool>,
     #[serde(rename = "customSystemPrompt")]
     pub custom_system_prompt: Option<String>,
 }
 
-// Struct to decode your JWT
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     tier: String,
     exp: usize,
 }
+
 fn verify_user_tier(headers: &HeaderMap) -> String {
     let secret = env::var("ESAMZ_MASTER_SECRET").unwrap_or_default();
-    
+
     if let Some(auth_header) = headers.get(header::AUTHORIZATION) {
         if let Ok(auth_str) = auth_header.to_str() {
             if auth_str.starts_with("Bearer ") {
                 let token = &auth_str[7..];
                 let validation = jsonwebtoken::Validation::default();
                 let key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());
-                
+
                 if let Ok(token_data) = jsonwebtoken::decode::<Claims>(token, &key, &validation) {
                     return token_data.claims.tier;
                 }
             }
         }
     }
-    "Free".to_string() // Default if no valid token is found
+    "Free".to_string()
 }
+
 // ============================================================================
 //  SHARED APPLICATION STATE
 // ============================================================================
@@ -441,7 +416,6 @@ pub struct ContextManager {
 impl ContextManager {
     pub fn new() -> Self {
         Self {
-            // [FIX-B10] Now correctly uses 32K window - 8K completion = ~24K input budget
             max_input_tokens: SARVAM_CONTEXT_WINDOW - MAX_COMPLETION_TOKENS as usize,
         }
     }
@@ -713,7 +687,7 @@ impl SearchDetector {
 }
 
 // ============================================================================
-//  WEB SEARCH (Serper — fallback for time-sensitive queries)
+//  WEB SEARCH
 // ============================================================================
 pub async fn perform_search(http: &Client, query: &str) -> Option<String> {
     let api_key = env_var("SERPER_API_KEY")?;
@@ -879,7 +853,6 @@ pub async fn stream_sarvam(
         }
     }
 
-    // Flush any remaining buffered data
     let remainder = std::mem::take(&mut buffer);
     for line in remainder.lines() {
         let line = line.trim();
@@ -1177,9 +1150,7 @@ async fn get_user_queue(
 }
 
 // ============================================================================
-//  RATE LIMITER
-// [FIX-B15] No longer blocks all requests when KV env vars are absent.
-//           Missing KV credentials now just disable rate limiting, never deny.
+//  RATE LIMITER  (FIX-B15)
 // ============================================================================
 pub struct RateLimiter {
     http: Client,
@@ -1190,9 +1161,7 @@ impl RateLimiter {
         Self { http }
     }
 
-    pub async fn check(&self, user_id: &str) -> (bool, u64) {
-        // [FIX-B15] If KV credentials are missing, skip rate limiting entirely
-        // instead of blocking every request in production.
+    pub async fn check(&self, user_id: &str, user_tier: &str) -> (bool, u64) {
         let url = match env_var("KV_REST_API_URL") {
             Some(u) => u,
             None => {
@@ -1206,6 +1175,14 @@ impl RateLimiter {
                 warn!("Rate limiting disabled: KV_REST_API_TOKEN not set");
                 return (true, 999);
             }
+        };
+
+        // Tier-based rate limits per hour
+        let limit: u64 = match user_tier {
+            "Max"  => 1000,
+            "Pro"  => 500,
+            "Plus" => 100,
+            _      => 10,  // Free: strict cap
         };
 
         let auth = format!("Bearer {}", token);
@@ -1224,7 +1201,7 @@ impl RateLimiter {
             let _ = self.http.post(&exp_url).header("Authorization", &auth).send().await;
         }
 
-        if current_usage > MAX_REQUESTS_PER_HOUR {
+        if current_usage > limit {
             let ttl_url = format!("{}/ttl/{}", url, user_id);
             let reset_in = async {
                 let r = self.http.post(&ttl_url).header("Authorization", &auth).send().await.ok()?;
@@ -1233,11 +1210,15 @@ impl RateLimiter {
             }
             .await
             .unwrap_or(3_600);
-            info!("Rate limit exceeded for user {}...", &user_id[..8.min(user_id.len())]);
+            info!(
+                "Rate limit exceeded for {} user {}...",
+                user_tier,
+                &user_id[..8.min(user_id.len())]
+            );
             return (false, reset_in);
         }
 
-        (true, MAX_REQUESTS_PER_HOUR - current_usage)
+        (true, limit - current_usage)
     }
 }
 
@@ -1261,6 +1242,9 @@ async fn process_user_request(
     message: String,
     client_history: Option<Vec<ChatMessage>>,
     client_last_active: Option<u64>,
+    user_tier: String,
+    system_prompt_override: Option<String>,
+    rag_enabled: bool,
 ) -> Body {
     let (tx, rx) = mpsc::channel::<String>(OUTER_CHANNEL_BUF);
     let body = stream_body(rx);
@@ -1269,6 +1253,7 @@ async fn process_user_request(
     tokio::spawn(async move {
         let result = run_request(
             state, session_id, message, client_history, client_last_active, tx,
+            user_tier, system_prompt_override, rag_enabled,
         )
         .await;
 
@@ -1312,14 +1297,15 @@ async fn run_request(
     client_history: Option<Vec<ChatMessage>>,
     client_last_active: Option<u64>,
     tx: mpsc::Sender<String>,
+    user_tier: String,
+    system_prompt_override: Option<String>,
+    rag_enabled: bool,
 ) -> Result<(), String> {
-    // ── Session history ──────────────────────────────────────────────────────
     let (history, user_name) = {
         let mut store = state.session_store.lock().await;
         store.get_session(&session_id, client_history.as_ref(), client_last_active)
     };
 
-    // ── Security ─────────────────────────────────────────────────────────────
     for (pattern, refusal) in BLOCKED_PATTERNS.iter() {
         if pattern.is_match(&message) {
             warn!("Security: Blocked pattern for {}...", &session_id[..8.min(session_id.len())]);
@@ -1329,7 +1315,6 @@ async fn run_request(
         }
     }
 
-    // ── Slash commands ───────────────────────────────────────────────────────
     if let Some(cmd) = handle_slash_command(&message, &history, user_name.as_deref(), &session_id) {
         if cmd.clear_history {
             let mut store = state.session_store.lock().await;
@@ -1342,7 +1327,11 @@ async fn run_request(
             let _ = tx.send(send_event("STATUS", "SEARCHING")).await;
 
             let rag_context = build_rag_context(&state.http, &cmd.search_query, false).await;
-            let system_prompt = build_system_prompt(&user_name);
+            let system_prompt = if user_tier == "Max" {
+                system_prompt_override.clone().unwrap_or_else(|| build_system_prompt(&user_name))
+            } else {
+                build_system_prompt(&user_name)
+            };
 
             let mut raw_msgs: Vec<Value> =
                 vec![json!({ "role": "system", "content": system_prompt })];
@@ -1398,25 +1387,37 @@ async fn run_request(
         return Ok(());
     }
 
-    // ── Easter eggs ───────────────────────────────────────────────────────────
     if let Some(egg) = check_easter_egg(&message) {
         let _ = tx.send(send_event("CHUNK", egg)).await;
         finalize_response(&state, &session_id, &message, egg, &history, user_name, &tx).await;
         return Ok(());
     }
 
-    // ── Build RAG context ─────────────────────────────────────────────────────
     let detector = SearchDetector::new();
-    let rag_context = if detector.should_retrieve(&message) {
-        info!("RAG: retrieval triggered for: {}...", &message[..50.min(message.len())]);
+    let rag_context = if user_tier != "Free" && rag_enabled && detector.should_retrieve(&message) {
+        // rag_enabled comes from the verified effective_rag_enabled computed in chat_handler.
+        // Free tier is always false there, so this check is belt-and-suspenders.
+        info!(
+            "RAG triggered for tier '{}' (rag_enabled={}): {}...",
+            user_tier, rag_enabled, &message[..50.min(message.len())]
+        );
         let _ = tx.send(send_event("STATUS", "SEARCHING")).await;
         build_rag_context(&state.http, &message, detector.is_time_sensitive(&message)).await
     } else {
+        if user_tier == "Free" && detector.should_retrieve(&message) {
+            warn!("RAG blocked: Free-tier user");
+        } else if !rag_enabled && detector.should_retrieve(&message) {
+            info!("RAG skipped: disabled by user preference");
+        }
         String::new()
     };
 
-    // ── Build messages ────────────────────────────────────────────────────────
-    let system_prompt = build_system_prompt(&user_name);
+    // Use Max-tier custom system prompt if provided, otherwise build default
+    let system_prompt = if user_tier == "Max" {
+        system_prompt_override.unwrap_or_else(|| build_system_prompt(&user_name))
+    } else {
+        build_system_prompt(&user_name)
+    };
     let mut raw_msgs: Vec<Value> =
         vec![json!({ "role": "system", "content": system_prompt })];
 
@@ -1434,7 +1435,6 @@ async fn run_request(
     let ctx = ContextManager::new();
     let messages = ctx.limit(&raw_msgs);
 
-    // ── Stream Sarvam response ────────────────────────────────────────────────
     let _ = tx.send(send_event("STATUS", "TYPING")).await;
 
     let (chunk_tx, mut chunk_rx) = mpsc::channel::<String>(INNER_CHANNEL_BUF);
@@ -1456,7 +1456,6 @@ async fn run_request(
         let _ = tx.send(send_event("CHUNK", &chunk)).await;
     }
 
-    // ── Persist ───────────────────────────────────────────────────────────────
     finalize_response(&state, &session_id, &message, &full_response, &history, user_name, &tx).await;
 
     Ok(())
@@ -1468,31 +1467,35 @@ async fn run_request(
 
 async fn chat_handler(
     State(state): State<AppState>,
-    headers: HeaderMap, // ADD THIS EXTRACTOR
+    headers: HeaderMap,
     jar: CookieJar,
     Json(body): Json<ChatRequest>,
 ) -> impl IntoResponse {
-    let user_tier = verify_user_tier(&headers); // Check token
-
-    // --- ENFORCE PAID FEATURES ---
-    let final_rag_enabled = match user_tier.as_str() {
-        "Plus" => true, // Always on for Plus
-        "Pro" | "Max" => body.rag_enabled.unwrap_or(true),
-        _ => false, // Forced OFF for Free users
-    };
-
-    let final_system_prompt = if user_tier == "Max" {
+    let user_tier = verify_user_tier(&headers);
+    let system_prompt_override = if user_tier == "Max" {
         body.custom_system_prompt.clone()
     } else {
-        None // Ignored for anyone else
+        None
     };
 
-    // --- UPDATE RATE LIMITER ---
-    // You must pass 'user_tier' into your RateLimiter check logic 
-    // to allow higher limits for paid users.
+    // Free: RAG always off. Plus: always on. Pro/Max: user's own toggle, default on.
+    let effective_rag_enabled: bool = match user_tier.as_str() {
+        "Max" | "Pro" => body.rag_enabled.unwrap_or(true),
+        "Plus"        => true,
+        _             => false,
+    };
+
+    // FIX-2: Derive session_id and message — these were missing entirely
+    let session_id = body
+        .session_id
+        .clone()
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let message = body.message.clone();
+
+    // FIX-3: Pass user_tier to rate limiter so Free users get strict limit (10/hr)
     let rate_limiter = RateLimiter::new(state.http.clone());
     let (allowed, reset_in) = rate_limiter.check(&session_id, &user_tier).await;
-    
+
     if !allowed {
         warn!("Rate limit: User {}... exceeded limit", &session_id[..8.min(session_id.len())]);
         let (tx, rx) = mpsc::channel::<String>(4);
@@ -1501,12 +1504,12 @@ async fn chat_handler(
             let _ = tx.send(send_event("ERROR", &msg)).await;
         });
         let response_body = stream_body(rx);
-        let mut headers = HeaderMap::new();
-        headers.insert(
+        let mut resp_headers = HeaderMap::new();
+        resp_headers.insert(
             "X-Session-ID",
             HeaderValue::from_str(&session_id).unwrap_or(HeaderValue::from_static("")),
         );
-        return (StatusCode::OK, headers, response_body).into_response();
+        return (StatusCode::OK, resp_headers, response_body).into_response();
     }
 
     let queue = get_user_queue(&state.user_queues, &session_id, &state.session_store).await;
@@ -1516,12 +1519,15 @@ async fn chat_handler(
     let ch = body.client_history.clone();
     let cla = body.client_last_active;
     let msg = message.clone();
+    let tier = user_tier.clone();
+    let sp_ov = system_prompt_override.clone();
+    let rag_active = effective_rag_enabled;
 
     let response_body = queue
         .add(move || {
             let s = state_clone.clone();
             let id = sid.clone();
-            async move { process_user_request(s, id, msg, ch, cla).await }
+            async move { process_user_request(s, id, msg, ch, cla, tier, sp_ov, rag_active).await }
         })
         .await;
 
@@ -1533,28 +1539,25 @@ async fn chat_handler(
         .build();
     let jar = jar.add(cookie);
 
-    let mut headers = HeaderMap::new();
-    headers.insert(
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(
         "X-Session-ID",
         HeaderValue::from_str(&session_id).unwrap_or(HeaderValue::from_static("")),
     );
-    // [FIX-B2] Explicit charset in content-type
-    headers.insert(
+    resp_headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/plain; charset=utf-8"),
     );
-    // [FIX-B1] Tell Nginx/Render NOT to buffer the streaming response
-    headers.insert(
+    resp_headers.insert(
         HeaderName::from_static("x-accel-buffering"),
         HeaderValue::from_static("no"),
     );
-    // [FIX-B3] Prevent proxy caching or buffering of the response
-    headers.insert(
+    resp_headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("no-cache, no-store"),
     );
 
-    (jar, (StatusCode::OK, headers, response_body)).into_response()
+    (jar, (StatusCode::OK, resp_headers, response_body)).into_response()
 }
 
 async fn privacy_status_handler(
@@ -1661,7 +1664,6 @@ async fn main() {
         .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers(Any);
-    
 
     let app = Router::new()
         .route("/api/chat", post(chat_handler))
