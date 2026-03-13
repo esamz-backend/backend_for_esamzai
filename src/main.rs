@@ -1211,7 +1211,7 @@ pub async fn check(&self, user_id: &str, user_tier: &str) -> (bool, u64) {
     // Return remaining messages based on the tier's specific limit
     (true, limit.saturating_sub(current_usage))
 }
-
+}
 // ============================================================================
 //  SYSTEM PROMPT BUILDER
 // ============================================================================
