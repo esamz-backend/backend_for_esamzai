@@ -27,7 +27,8 @@ use axum::{
     extract::{Json, State},
     http::{
         header::{self, HeaderMap, HeaderName, HeaderValue},
-        Method, StatusCode,
+        Method, Status
+        Code,
     },
     response::IntoResponse,
     routing::{delete, get, post},
@@ -174,6 +175,7 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+// In src/main.rs
 #[derive(Debug, Deserialize)]
 pub struct ChatRequest {
     pub message: String,
@@ -183,8 +185,37 @@ pub struct ChatRequest {
     pub client_history: Option<Vec<ChatMessage>>,
     #[serde(rename = "clientLastActive")]
     pub client_last_active: Option<u64>,
+    // ADD THESE:
+    #[serde(rename = "ragEnabled")]
+    pub rag_enabled: Option<bool>,
+    #[serde(rename = "customSystemPrompt")]
+    pub custom_system_prompt: Option<String>,
 }
 
+// Struct to decode your JWT
+#[derive(Debug, Serialize, Deserialize)]
+struct Claims {
+    tier: String,
+    exp: usize,
+}
+fn verify_user_tier(headers: &HeaderMap) -> String {
+    let secret = env::var("ESAMZ_MASTER_SECRET").unwrap_or_default();
+    
+    if let Some(auth_header) = headers.get(header::AUTHORIZATION) {
+        if let Ok(auth_str) = auth_header.to_str() {
+            if auth_str.starts_with("Bearer ") {
+                let token = &auth_str[7..];
+                let validation = jsonwebtoken::Validation::default();
+                let key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());
+                
+                if let Ok(token_data) = jsonwebtoken::decode::<Claims>(token, &key, &validation) {
+                    return token_data.claims.tier;
+                }
+            }
+        }
+    }
+    "Free".to_string() // Default if no valid token is found
+}
 // ============================================================================
 //  SHARED APPLICATION STATE
 // ============================================================================
@@ -1437,22 +1468,31 @@ async fn run_request(
 
 async fn chat_handler(
     State(state): State<AppState>,
+    headers: HeaderMap, // ADD THIS EXTRACTOR
     jar: CookieJar,
     Json(body): Json<ChatRequest>,
 ) -> impl IntoResponse {
-    let message = body.message.trim().to_string();
-    if message.is_empty() || message.len() > 250_000{
-        return (StatusCode::BAD_REQUEST, "message limit exeeded").into_response();
-    }
+    let user_tier = verify_user_tier(&headers); // Check token
 
-    let session_id = body
-        .session_id
-        .clone()
-        .or_else(|| jar.get(COOKIE_NAME).map(|c| c.value().to_string()))
-        .unwrap_or_else(|| hex::encode(rand::thread_rng().gen::<[u8; 16]>()));
+    // --- ENFORCE PAID FEATURES ---
+    let final_rag_enabled = match user_tier.as_str() {
+        "Plus" => true, // Always on for Plus
+        "Pro" | "Max" => body.rag_enabled.unwrap_or(true),
+        _ => false, // Forced OFF for Free users
+    };
 
+    let final_system_prompt = if user_tier == "Max" {
+        body.custom_system_prompt.clone()
+    } else {
+        None // Ignored for anyone else
+    };
+
+    // --- UPDATE RATE LIMITER ---
+    // You must pass 'user_tier' into your RateLimiter check logic 
+    // to allow higher limits for paid users.
     let rate_limiter = RateLimiter::new(state.http.clone());
-    let (allowed, reset_in) = rate_limiter.check(&session_id).await;
+    let (allowed, reset_in) = rate_limiter.check(&session_id, &user_tier).await;
+    
     if !allowed {
         warn!("Rate limit: User {}... exceeded limit", &session_id[..8.min(session_id.len())]);
         let (tx, rx) = mpsc::channel::<String>(4);
