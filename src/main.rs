@@ -1161,65 +1161,55 @@ impl RateLimiter {
         Self { http }
     }
 
-    pub async fn check(&self, user_id: &str, user_tier: &str) -> (bool, u64) {
-        let url = match env_var("KV_REST_API_URL") {
-            Some(u) => u,
-            None => {
-                warn!("Rate limiting disabled: KV_REST_API_URL not set");
-                return (true, 999);
-            }
-        };
-        let token = match env_var("KV_REST_API_TOKEN") {
-            Some(t) => t,
-            None => {
-                warn!("Rate limiting disabled: KV_REST_API_TOKEN not set");
-                return (true, 999);
-            }
-        };
+    // Inside impl RateLimiter in src/main.rs
 
-        // Tier-based rate limits per hour
-        let limit: u64 = match user_tier {
-            "Max"  => 1000,
-            "Pro"  => 500,
-            "Plus" => 100,
-            _      => 10,  // Free: strict cap
-        };
+pub async fn check(&self, user_id: &str, user_tier: &str) -> (bool, u64) {
+    let url = match env_var("KV_REST_API_URL") {
+        Some(u) => u,
+        None => return (true, 999),
+    };
+    let token = match env_var("KV_REST_API_TOKEN") {
+        Some(t) => t,
+        None => return (true, 999),
+    };
 
-        let auth = format!("Bearer {}", token);
-        let incr_url = format!("{}/incr/{}", url, user_id);
-        let Ok(incr_resp) = self.http.post(&incr_url).header("Authorization", &auth).send().await
-        else {
-            return (true, 1);
-        };
-        let Ok(incr_json) = incr_resp.json::<Value>().await else {
-            return (true, 1);
-        };
-        let current_usage = incr_json["result"].as_u64().unwrap_or(0);
+    // SECURE FIX: Define strict limits based on the verified JWT tier
+    let limit: u64 = match user_tier {
+        "Max"  => 1000,
+        "Pro"  => 100,
+        "Plus" => 50,
+        _      => 10,  // Free users: strictly 10 messages per hour
+    };
 
-        if current_usage == 1 {
-            let exp_url = format!("{}/expire/{}/3600", url, user_id);
-            let _ = self.http.post(&exp_url).header("Authorization", &auth).send().await;
-        }
+    let auth = format!("Bearer {}", token);
+    let incr_url = format!("{}/incr/{}", url, user_id);
+    
+    let Ok(incr_resp) = self.http.post(&incr_url).header("Authorization", &auth).send().await else {
+        return (true, 1);
+    };
+    let Ok(incr_json) = incr_resp.json::<Value>().await else {
+        return (true, 1);
+    };
+    
+    let current_usage = incr_json["result"].as_u64().unwrap_or(0);
 
-        if current_usage > limit {
-            let ttl_url = format!("{}/ttl/{}", url, user_id);
-            let reset_in = async {
-                let r = self.http.post(&ttl_url).header("Authorization", &auth).send().await.ok()?;
-                let v: Value = r.json().await.ok()?;
-                v["result"].as_u64()
-            }
-            .await
-            .unwrap_or(3_600);
-            info!(
-                "Rate limit exceeded for {} user {}...",
-                user_tier,
-                &user_id[..8.min(user_id.len())]
-            );
-            return (false, reset_in);
-        }
-
-        (true, limit - current_usage)
+    if current_usage == 1 {
+        let _ = self.http.post(&format!("{}/expire/{}/3600", url, user_id)).header("Authorization", &auth).send().await;
     }
+
+    if current_usage > limit {
+        let ttl_url = format!("{}/ttl/{}", url, user_id);
+        let reset_in = async {
+            let r = self.http.post(&ttl_url).header("Authorization", &auth).send().await.ok()?;
+            let v: Value = r.json().await.ok()?;
+            v["result"].as_u64()
+        }.await.unwrap_or(3_600);
+
+        return (false, reset_in);
+    }
+
+    // Return remaining messages based on the tier's specific limit
+    (true, limit.saturating_sub(current_usage))
 }
 
 // ============================================================================
@@ -1393,24 +1383,21 @@ async fn run_request(
         return Ok(());
     }
 
-    let detector = SearchDetector::new();
-    let rag_context = if user_tier != "Free" && rag_enabled && detector.should_retrieve(&message) {
-        // rag_enabled comes from the verified effective_rag_enabled computed in chat_handler.
-        // Free tier is always false there, so this check is belt-and-suspenders.
-        info!(
-            "RAG triggered for tier '{}' (rag_enabled={}): {}...",
-            user_tier, rag_enabled, &message[..50.min(message.len())]
-        );
-        let _ = tx.send(send_event("STATUS", "SEARCHING")).await;
-        build_rag_context(&state.http, &message, detector.is_time_sensitive(&message)).await
-    } else {
-        if user_tier == "Free" && detector.should_retrieve(&message) {
-            warn!("RAG blocked: Free-tier user");
-        } else if !rag_enabled && detector.should_retrieve(&message) {
-            info!("RAG skipped: disabled by user preference");
-        }
-        String::new()
-    };
+    // Inside run_request in src/main.rs
+
+let detector = SearchDetector::new();
+let rag_context = if user_tier != "Free" && rag_enabled && detector.should_retrieve(&message) {
+    // Verified: Only non-free users who have RAG enabled can search
+    info!("RAG triggered for tier '{}': {}...", user_tier, &message[..50.min(message.len())]);
+    let _ = tx.send(send_event("STATUS", "SEARCHING")).await;
+    build_rag_context(&state.http, &message, detector.is_time_sensitive(&message)).await
+} else {
+    // Safety check: Log if a free user tried to bypass
+    if user_tier == "Free" && detector.should_retrieve(&message) {
+        warn!("Bypass attempt: RAG blocked for Free user session {}", &session_id[..8]);
+    }
+    String::new()
+};
 
     // Use Max-tier custom system prompt if provided, otherwise build default
     let system_prompt = if user_tier == "Max" {
