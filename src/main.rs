@@ -1204,7 +1204,7 @@ pub async fn check(&self, user_id: &str, user_tier: &str) -> (bool, u64) {
         "Max"  => 1000,
         "Pro"  => 100,
         "Plus" => 50,
-        _      => 10,  // Free users: strictly 10 messages per hour
+        _      => 20,  // Free users: strictly 10 messages per hour
     };
 
     let auth = format!("Bearer {}", token);
