@@ -1222,7 +1222,7 @@ pub async fn check(&self, user_id: &str, user_tier: &str) -> (bool, u64) {
     let current_usage = incr_json["result"].as_u64().unwrap_or(0);
 
     if current_usage == 1 {
-        let _ = self.http.post(&format!("{}/expire/{}/3600", url, user_id)).header("Authorization", &auth).send().await;
+        let _ = self.http.post(&format!("{}/expire/{}/86400", url, user_id)).header("Authorization", &auth).send().await;
     }
 
     if current_usage > limit {
