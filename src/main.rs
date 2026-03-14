@@ -147,10 +147,9 @@ fn privacy_mode() -> bool {
 // ============================================================================
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
-    pub role: String,
+  pub role: String,
     pub content: String,
 }
-
 #[derive(Debug, Deserialize)]
 pub struct ChatRequest {
     pub message: String,
@@ -168,11 +167,12 @@ pub struct ChatRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
-    tier: String,
-    exp: usize,
+    pub sub: String, // The exact user ID from your database
+    pub tier: String,
+    pub exp: usize,
 }
 
-fn verify_user_tier(headers: &HeaderMap) -> String {
+fn verify_auth(headers: &HeaderMap) -> (String, Option<String>) {
     let secret = env::var("ESAMZ_MASTER_SECRET").unwrap_or_default();
 
     if let Some(auth_header) = headers.get(header::AUTHORIZATION) {
@@ -183,12 +183,14 @@ fn verify_user_tier(headers: &HeaderMap) -> String {
                 let key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());
 
                 if let Ok(token_data) = jsonwebtoken::decode::<Claims>(token, &key, &validation) {
-                    return token_data.claims.tier;
+                    // Return both the tier and the database user_id
+                    return (token_data.claims.tier, Some(token_data.claims.sub));
                 }
             }
         }
     }
-    "Free".to_string()
+    // If auth fails or is missing, they are Free and have no database ID
+    ("Free".to_string(), None)
 }
 
 // ============================================================================
@@ -1477,40 +1479,59 @@ let rag_context = if user_tier != "Free" && rag_enabled && detector.should_retri
 // ============================================================================
 //  HTTP HANDLERS
 // ============================================================================
+fn get_rate_limit_id(headers: &HeaderMap, jwt_user_id: Option<String>) -> String {
+    // 1. If they have a valid database ID from the JWT, use it (Bulletproof)
+    if let Some(uid) = jwt_user_id {
+        return format!("user_{}", uid);
+    }
 
+    // 2. Fallback to IP address for Free/Unauthenticated users (from Render proxy)
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|h| h.to_str().ok()) {
+        if let Some(ip) = xff.split(',').next() {
+            return format!("ip_{}", ip.trim());
+        }
+    }
+
+    // 3. Fallback if something goes wrong reading headers
+    "unknown_client".to_string()
+}
 async fn chat_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(body): Json<ChatRequest>,
 ) -> impl IntoResponse {
-    let user_tier = verify_user_tier(&headers);
+    // 1. Get both tier and ID from the auth token
+    let (user_tier, jwt_user_id) = verify_auth(&headers);
+    
+    // 2. Generate the unbreakable rate limit target
+    let rate_limit_id = get_rate_limit_id(&headers, jwt_user_id);
+
     let system_prompt_override = if user_tier == "Max" {
         body.custom_system_prompt.clone()
     } else {
         None
     };
 
-    // Free: RAG always off. Plus: always on. Pro/Max: user's own toggle, default on.
     let effective_rag_enabled: bool = match user_tier.as_str() {
         "Max" | "Pro" => body.rag_enabled.unwrap_or(true),
         "Plus"        => true,
         _             => false,
     };
 
-    // FIX-2: Derive session_id and message — these were missing entirely
     let session_id = body
         .session_id
         .clone()
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let message = body.message.clone();
 
-    // FIX-3: Pass user_tier to rate limiter so Free users get strict limit (10/hr)
+    // 3. Check the rate limit using our new smart ID!
     let rate_limiter = RateLimiter::new(state.http.clone());
-    let (allowed, reset_in) = rate_limiter.check(&session_id, &user_tier).await;
+    let (allowed, reset_in) = rate_limiter.check(&rate_limit_id, &user_tier).await;
 
     if !allowed {
-        warn!("Rate limit: User {}... exceeded limit", &session_id[..8.min(session_id.len())]);
+        warn!("Rate limit: ID {} exceeded limit", &rate_limit_id);
+// ... the rest of your handler remains exactly the same ...
         let (tx, rx) = mpsc::channel::<String>(4);
         let msg = format!("Rate limit exceeded. Try again in {} seconds.", reset_in);
         tokio::spawn(async move {
