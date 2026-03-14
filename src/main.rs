@@ -824,6 +824,7 @@ pub async fn stream_sarvam(
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
 
+    // === PART 1: THE MAIN STREAM LOOP ===
     while let Some(chunk) = stream.next().await {
         let chunk = match chunk {
             Ok(c) => c,
@@ -839,31 +840,56 @@ pub async fn stream_sarvam(
             let line = buffer[..pos].trim().to_string();
             buffer = buffer[pos + 1..].to_string();
 
-            if line.is_empty() || !line.starts_with("data: ") || line.contains("[DONE]") {
+            if line.is_empty() || line.contains("[DONE]") {
                 continue;
             }
-            let json_str = &line[6..];
+
+            let json_str = if line.starts_with("data: ") {
+                &line[6..]
+            } else if line.starts_with("data:") {
+                &line[5..]
+            } else if line.starts_with('{') {
+                &line[..]
+            } else {
+                continue;
+            };
+
             if let Ok(data) = serde_json::from_str::<Value>(json_str) {
-                if let Some(content) = data["choices"][0]["delta"]["content"].as_str() {
-                    if !content.is_empty() {
-                        let _ = tx.send(content.to_string()).await;
+                let content = data["choices"][0]["delta"]["content"].as_str()
+                    .or_else(|| data["choices"][0]["message"]["content"].as_str());
+                if let Some(text) = content {
+                    if !text.is_empty() {
+                        let _ = tx.send(text.to_string()).await;
                     }
                 }
             }
         }
     }
 
+    // === PART 2: THE REMAINDER BLOCK ===
     let remainder = std::mem::take(&mut buffer);
     for line in remainder.lines() {
         let line = line.trim();
-        if line.is_empty() || !line.starts_with("data: ") || line.contains("[DONE]") {
+        if line.is_empty() || line.contains("[DONE]") {
             continue;
         }
-        let json_str = &line[6..];
+
+        let json_str = if line.starts_with("data: ") {
+            &line[6..]
+        } else if line.starts_with("data:") {
+            &line[5..]
+        } else if line.starts_with('{') {
+            &line[..]
+        } else {
+            continue;
+        };
+
         if let Ok(data) = serde_json::from_str::<Value>(json_str) {
-            if let Some(content) = data["choices"][0]["delta"]["content"].as_str() {
-                if !content.is_empty() {
-                    let _ = tx.send(content.to_string()).await;
+            let content = data["choices"][0]["delta"]["content"].as_str()
+                .or_else(|| data["choices"][0]["message"]["content"].as_str());
+            if let Some(text) = content {
+                if !text.is_empty() {
+                    let _ = tx.send(text.to_string()).await;
                 }
             }
         }
@@ -1641,7 +1667,8 @@ async fn main() {
         session_store: Arc::new(Mutex::new(SessionStore::new())),
         user_queues: Arc::new(Mutex::new(HashMap::new())),
         http: Client::builder()
-            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(30)) // Wait 30s to connect
+            .timeout(Duration::from_secs(300)) // Give the LLM up to 5 minutes to stream the full response
             .user_agent("eSAMz-AI/9.4")
             .build()
             .expect("Failed to create HTTP client"),
