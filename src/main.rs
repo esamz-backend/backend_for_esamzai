@@ -47,7 +47,7 @@ use uuid::Uuid; // FIX-2: need uuid crate
 //  CONSTANTS / CONFIG
 // ============================================================================
 const SARVAM_MODEL: &str = "sarvam-30b";
-const MAX_COMPLETION_TOKENS: u32 = 4_096;
+const MAX_COMPLETION_TOKENS: u32 = 6_096;
 const SARVAM_CONTEXT_WINDOW: usize = 128_000;
 const ENGLISH_CHARS_PER_TOKEN: f64 = 3.5;
 const INDIC_CHARS_PER_TOKEN: f64 = 3.0;
@@ -55,7 +55,7 @@ const COOKIE_NAME: &str = "esamz_sid";
 const MAX_CONTEXT_CHARS: usize = 360_000;
 const INACTIVITY_TIMEOUT_SEC: u64 = 30 * 60;
 const USER_QUEUE_MIN_MS: u64 = 200; // FIX-B14: was 1000
-const MAX_REQUESTS_PER_HOUR: u64 = 100;
+const MAX_REQUESTS_PER_DAY: u64 = 100;
 const MAX_CONCURRENT_SESSIONS: usize = 200;
 const PROTECTED_RECENT_MESSAGES: usize = 4;
 const INNER_CHANNEL_BUF: usize = 1_024;
@@ -1229,7 +1229,7 @@ pub async fn check(&self, user_id: &str, user_tier: &str) -> (bool, u64) {
             let r = self.http.post(&ttl_url).header("Authorization", &auth).send().await.ok()?;
             let v: Value = r.json().await.ok()?;
             v["result"].as_u64()
-        }.await.unwrap_or(3_600);
+        }.await.unwrap_or(86_400);
 
         return (false, reset_in);
     }
