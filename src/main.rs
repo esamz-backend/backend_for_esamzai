@@ -46,7 +46,7 @@ use uuid::Uuid;
 // ============================================================================
 //  CONSTANTS / CONFIG
 // ============================================================================
-const SARVAM_MODEL: &str = "sarvam-105b";
+const SARVAM_MODEL: &str = "sarvam-30b";
 const MAX_COMPLETION_TOKENS: u32 = 10_096;
 const SARVAM_CONTEXT_WINDOW: usize = 128_000;
 const ENGLISH_CHARS_PER_TOKEN: f64 = 3.5;
