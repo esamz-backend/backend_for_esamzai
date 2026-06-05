@@ -1,5 +1,5 @@
 // ============================================================================
-//  eSAMz v9.4 — Sarvam API + Wikipedia RAG
+//  eSAMz v9.4 — Google Gemma API + Wikipedia RAG
 //  Framework : Axum + Tokio
 //  Author    : Alakmar Teenwala
 //  CORS      : Restricted to https://esamz.site
@@ -46,9 +46,9 @@ use uuid::Uuid;
 // ============================================================================
 //  CONSTANTS / CONFIG
 // ============================================================================
-const SARVAM_MODEL: &str = "sarvam-105b";
+const GEMMA_MODEL: &str = "gemma-4-26b-a4b-it";
 const MAX_COMPLETION_TOKENS: u32 = 4_096;
-const SARVAM_CONTEXT_WINDOW: usize = 128_000;
+const GEMMA_CONTEXT_WINDOW: usize = 131_072;
 const ENGLISH_CHARS_PER_TOKEN: f64 = 3.5;
 const INDIC_CHARS_PER_TOKEN: f64 = 3.0;
 const COOKIE_NAME: &str = "esamz_sid";
@@ -423,7 +423,7 @@ pub struct ContextManager {
 impl ContextManager {
     pub fn new() -> Self {
         Self {
-            max_input_tokens: SARVAM_CONTEXT_WINDOW - MAX_COMPLETION_TOKENS as usize,
+            max_input_tokens: GEMMA_CONTEXT_WINDOW - MAX_COMPLETION_TOKENS as usize,
         }
     }
 
@@ -837,19 +837,19 @@ pub async fn stream_sarvam(
     session_id: &str,
     tx: mpsc::Sender<String>,
 ) {
-    let api_key = match env_var("SARVAM_API_KEY") {
+    let api_key = match env_var("GOOGLE_API_KEY") {
         Some(k) => k,
         None => {
-            error!("Sarvam API key not configured");
+            error!("Google API key not configured");
             let _ = tx
-                .send(send_event("ERROR", "SARVAM_API_KEY not configured"))
+                .send(send_event("ERROR", "GOOGLE_API_KEY not configured"))
                 .await;
             return;
         }
     };
 
     let body = json!({
-        "model": SARVAM_MODEL,
+        "model": GEMMA_MODEL,
         "messages": messages,
         "temperature": 0.7,
         "max_tokens": MAX_COMPLETION_TOKENS,
@@ -857,7 +857,7 @@ pub async fn stream_sarvam(
     });
 
     let resp = match http
-        .post("https://api.sarvam.ai/v1/chat/completions")
+        .post("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&body)

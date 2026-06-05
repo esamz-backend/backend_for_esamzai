@@ -63,7 +63,7 @@ Scroll down to **Environment Variables** section and add these one by one:
 
 | Key                | Value                  |
 |--------------------|------------------------|
-| `SARVAM_API_KEY`   | your actual key        |
+| `GOOGLE_API_KEY`   | your actual key        |
 | `SERPER_API_KEY`   | your actual key        |
 | `KV_REST_API_URL`  | your actual URL        |
 | `KV_REST_API_TOKEN`| your actual token      |
