@@ -906,10 +906,11 @@ pub async fn stream_sarvam(
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
         while let Some(pos) = buffer.find('\n') {
-            let line = buffer[..pos].trim().to_string();
+            let line = buffer[..pos].to_string();
             buffer = buffer[pos + 1..].to_string();
 
-            if line.is_empty() || line.contains("[DONE]") {
+            let trimmed_line = line.trim();
+            if trimmed_line.is_empty() || trimmed_line.contains("[DONE]") {
                 continue;
             }
 
@@ -917,13 +918,13 @@ pub async fn stream_sarvam(
                 &line[6..]
             } else if line.starts_with("data:") {
                 &line[5..]
-            } else if line.starts_with('{') {
-                &line[..]
+            } else if trimmed_line.starts_with('{') {
+                trimmed_line
             } else {
                 continue;
             };
 
-            if let Ok(data) = serde_json::from_str::<Value>(json_str) {
+            if let Ok(data) = serde_json::from_str::<Value>(json_str.trim()) {
                 let content = data["choices"][0]["delta"]["content"]
                     .as_str()
                     .or_else(|| data["choices"][0]["message"]["content"].as_str());
@@ -992,8 +993,8 @@ pub async fn stream_sarvam(
     // Drain remainder
     let remainder = std::mem::take(&mut buffer);
     for line in remainder.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.contains("[DONE]") {
+        let trimmed_line = line.trim();
+        if trimmed_line.is_empty() || trimmed_line.contains("[DONE]") {
             continue;
         }
 
@@ -1001,13 +1002,13 @@ pub async fn stream_sarvam(
             &line[6..]
         } else if line.starts_with("data:") {
             &line[5..]
-        } else if line.starts_with('{') {
-            &line[..]
+        } else if trimmed_line.starts_with('{') {
+            trimmed_line
         } else {
             continue;
         };
 
-        if let Ok(data) = serde_json::from_str::<Value>(json_str) {
+        if let Ok(data) = serde_json::from_str::<Value>(json_str.trim()) {
             let content = data["choices"][0]["delta"]["content"]
                 .as_str()
                 .or_else(|| data["choices"][0]["message"]["content"].as_str());
@@ -1252,7 +1253,8 @@ static BLOCKED_PATTERNS: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
 //  EVENT FORMATTER
 // ============================================================================
 pub fn send_event(event_type: &str, data: &str) -> String {
-    let safe = data.replace('\n', "\\n");
+    // Ensure we don't lose spaces and handle newlines correctly for SSE
+    let safe = data.replace('\r', "").replace('\n', "\\n");
     format!("{}|{}\n\n", event_type, safe)
 }
 
