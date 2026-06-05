@@ -886,6 +886,8 @@ pub async fn stream_sarvam(
 
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
+    let mut in_thought = false;
+    let mut stream_buffer = String::new();
 
     // Main stream loop
     while let Some(chunk) = stream.next().await {
@@ -927,7 +929,49 @@ pub async fn stream_sarvam(
                     .or_else(|| data["choices"][0]["message"]["content"].as_str());
                 if let Some(text) = content {
                     if !text.is_empty() {
-                        let _ = tx.send(text.to_string()).await;
+                        stream_buffer.push_str(text);
+                        
+                        // Process the stream_buffer to remove thought tags
+                        loop {
+                            if in_thought {
+                                if let Some(end_pos) = stream_buffer.find("</thought>") {
+                                    in_thought = false;
+                                    stream_buffer = stream_buffer[end_pos + 10..].to_string();
+                                } else if let Some(end_pos) = stream_buffer.find("<|thought|>") {
+                                    // Sometimes it might use this as an end or separator
+                                    in_thought = false;
+                                    stream_buffer = stream_buffer[end_pos + 11..].to_string();
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                if let Some(start_pos) = stream_buffer.find("<thought>") {
+                                    let before = stream_buffer[..start_pos].to_string();
+                                    if !before.is_empty() {
+                                        let _ = tx.send(before).await;
+                                    }
+                                    in_thought = true;
+                                    stream_buffer = stream_buffer[start_pos + 9..].to_string();
+                                } else if let Some(start_pos) = stream_buffer.find("<|thought|>") {
+                                    let before = stream_buffer[..start_pos].to_string();
+                                    if !before.is_empty() {
+                                        let _ = tx.send(before).await;
+                                    }
+                                    in_thought = true;
+                                    stream_buffer = stream_buffer[start_pos + 11..].to_string();
+                                } else {
+                                    // Send safe part of buffer
+                                    // We need to keep some characters to avoid splitting a tag
+                                    let len = stream_buffer.len();
+                                    if len > 12 {
+                                        let safe_to_send = &stream_buffer[..len - 12];
+                                        let _ = tx.send(safe_to_send.to_string()).await;
+                                        stream_buffer = stream_buffer[len - 12..].to_string();
+                                    }
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -958,10 +1002,15 @@ pub async fn stream_sarvam(
                 .or_else(|| data["choices"][0]["message"]["content"].as_str());
             if let Some(text) = content {
                 if !text.is_empty() {
-                    let _ = tx.send(text.to_string()).await;
+                    stream_buffer.push_str(text);
                 }
             }
         }
+    }
+
+    // Final processing of stream_buffer
+    if !in_thought && !stream_buffer.is_empty() {
+        let _ = tx.send(stream_buffer).await;
     }
 }
 
