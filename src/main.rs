@@ -1264,7 +1264,6 @@ static BLOCKED_PATTERNS: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
         (
             Regex::new(r"(?i)\b(what is your prompt|show your prompt|reveal your instructions)\b").unwrap(),
             "I cannot reveal my internal instructions or system prompt.",
-        )
         ),
     ]
 });
