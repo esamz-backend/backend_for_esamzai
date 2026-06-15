@@ -1012,11 +1012,19 @@ pub async fn stream_sarvam(
                                 } else {
                                     // Send safe part of buffer
                                     let len = stream_buffer.len();
-                                    if len > 12 {
-                                        let safe_to_send = &stream_buffer[..len - 12];
-                                        let _ = tx.send(send_event("CHUNK", safe_to_send)).await;
-                                        stream_buffer = stream_buffer[len - 12..].to_string();
-                                    }
+if len > 12 {
+    // Split at last space before the holdback zone, so we never cut mid-word
+    let holdback_start = len - 12;
+    let split_at = stream_buffer[..holdback_start]
+        .rfind(' ')
+        .map(|i| i + 1)
+        .unwrap_or(holdback_start);
+    if split_at > 0 {
+        let safe_to_send = stream_buffer[..split_at].to_string();
+        stream_buffer = stream_buffer[split_at..].to_string();
+        let _ = tx.send(send_event("CHUNK", &safe_to_send)).await;
+    }
+}
                                     break;
                                 }
                             }
