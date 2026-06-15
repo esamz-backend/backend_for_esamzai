@@ -1649,6 +1649,7 @@ async fn run_request(
     full_response.push_str(&text.replace("\\n", "\n"));
 }
 let _ = tx.send(chunk).await;
+            }
 
             // Cache the result
             {
@@ -1764,6 +1765,7 @@ let _ = tx.send(chunk).await;
     full_response.push_str(&text.replace("\\n", "\n"));
 }
 let _ = tx.send(chunk).await;
+    }
 
     // Cache the result
     {
