@@ -1017,7 +1017,7 @@ if len > 12 {
     let holdback_start = len - 12;
     let split_at = stream_buffer[..holdback_start]
         .rfind(' ')
-        .map(|i| i + 1)
+        .map(|i| i)
         .unwrap_or(holdback_start);
     if split_at > 0 {
         let safe_to_send = stream_buffer[..split_at].to_string();
@@ -1311,7 +1311,7 @@ static BLOCKED_PATTERNS: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
 // ============================================================================
 pub fn send_event(event_type: &str, data: &str) -> String {
     // Ensure we don't lose spaces and handle newlines correctly for SSE
-    let safe = data.replace('\r', "").replace('\n', "\\n");
+    let safe = data.replace('\r', "").replace('\\', "\\\\").replace('\n', "\\n");
     format!("{}|{}\n\n", event_type, safe)
 }
 
@@ -1646,7 +1646,7 @@ async fn run_request(
                     return Ok(());
                 }
                 if let Some(text) = chunk.strip_prefix("CHUNK|").and_then(|s| s.strip_suffix("\n\n")) {
-    full_response.push_str(&text.replace("\\n", "\n"));
+    full_response.push_str(&text.replace("\\n", "\n").replace("\\\\", "\\"));
 }
 let _ = tx.send(chunk).await;
             }
@@ -1762,7 +1762,7 @@ let _ = tx.send(chunk).await;
             return Ok(());
         }
         if let Some(text) = chunk.strip_prefix("CHUNK|").and_then(|s| s.strip_suffix("\n\n")) {
-    full_response.push_str(&text.replace("\\n", "\n"));
+    full_response.push_str(&text.replace("\\n", "\n").replace("\\\\", "\\"));
 }
 let _ = tx.send(chunk).await;
     }
