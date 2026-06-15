@@ -998,14 +998,14 @@ pub async fn stream_sarvam(
                                 if let Some(start_pos) = stream_buffer.find("<thought>") {
                                     let before = stream_buffer[..start_pos].to_string();
                                     if !before.is_empty() {
-                                        let _ = tx.send(before).await;
+                                        let _ = tx.send(send_event("CHUNK", &before)).await;
                                     }
                                     in_thought = true;
                                     stream_buffer = stream_buffer[start_pos + 9..].to_string();
                                 } else if let Some(start_pos) = stream_buffer.find("<|thought|>") {
                                     let before = stream_buffer[..start_pos].to_string();
                                     if !before.is_empty() {
-                                        let _ = tx.send(before).await;
+                                        let _ = tx.send(send_event("CHUNK", &before)).await;
                                     }
                                     in_thought = true;
                                     stream_buffer = stream_buffer[start_pos + 11..].to_string();
@@ -1014,7 +1014,7 @@ pub async fn stream_sarvam(
                                     let len = stream_buffer.len();
                                     if len > 12 {
                                         let safe_to_send = &stream_buffer[..len - 12];
-                                        let _ = tx.send(safe_to_send.to_string()).await;
+                                        let _ = tx.send(send_event("CHUNK", safe_to_send)).await;
                                         stream_buffer = stream_buffer[len - 12..].to_string();
                                     }
                                     break;
@@ -1059,7 +1059,7 @@ pub async fn stream_sarvam(
 
     // Final processing of stream_buffer
     if !in_thought && !stream_buffer.is_empty() {
-        let _ = tx.send(stream_buffer).await;
+      let _ = tx.send(send_event("CHUNK", &stream_buffer)).await;
     }
 }
 
