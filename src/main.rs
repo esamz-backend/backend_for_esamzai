@@ -11,11 +11,11 @@ use axum::{
     body::Body,
     extract::{Json, State},
     http::{
-        header::{self, HeaderMap, HeaderName, HeaderValue},
+        header::{self, HeaderMap, HeaderValue},
         Method, StatusCode,
     },
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{get, post},
     Router,
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -39,7 +39,7 @@ use tokio::{
     time::{sleep, Instant},
 };
 use tokio_stream::wrappers::ReceiverStream;
-use tower_http::cors::{AllowHeaders, AllowMethods, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -325,7 +325,7 @@ impl SessionStore {
             return (hist.clone(), user_name);
         }
 
-        if let Some(session) = self.memory.get(session_id) {
+        if let Some(session) = self.memory.get_mut(session_id) {
             let inactive = now - session.last_active;
             if inactive > limit {
                 self.memory.remove(session_id);
@@ -336,9 +336,7 @@ impl SessionStore {
                 return (vec![], None);
             }
             // Update last_active on retrieval
-            if let Some(s) = self.memory.get_mut(session_id) {
-                s.last_active = now;
-            }
+            session.last_active = now;
             return (session.history.clone(), session.user_name.clone());
         }
 
