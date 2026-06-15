@@ -1645,9 +1645,10 @@ async fn run_request(
                     let _ = tx.send(chunk).await;
                     return Ok(());
                 }
-                full_response.push_str(&chunk);
-                let _ = tx.send(send_event("CHUNK", &chunk)).await;
-            }
+                if let Some(text) = chunk.strip_prefix("CHUNK|").and_then(|s| s.strip_suffix("\n\n")) {
+    full_response.push_str(&text.replace("\\n", "\n"));
+}
+let _ = tx.send(chunk).await;
 
             // Cache the result
             {
@@ -1759,9 +1760,10 @@ async fn run_request(
             let _ = tx.send(chunk).await;
             return Ok(());
         }
-        full_response.push_str(&chunk);
-        let _ = tx.send(send_event("CHUNK", &chunk)).await;
-    }
+        if let Some(text) = chunk.strip_prefix("CHUNK|").and_then(|s| s.strip_suffix("\n\n")) {
+    full_response.push_str(&text.replace("\\n", "\n"));
+}
+let _ = tx.send(chunk).await;
 
     // Cache the result
     {
